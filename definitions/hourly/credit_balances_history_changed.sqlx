@@ -1,0 +1,96 @@
+config {
+    type: "table",
+    tags: ["hourly", "backfill_credit_balances"],
+    bigquery:
+    {
+        clusterBy: ["user_uid", "interval_start_dt", "interval_end_dt"]
+    }
+}
+-- todo 주기적으로 hourly 돌리려면, hour 스냅샷이 언제 들어오는지 알아야 한다. 그에 맞게 hour 설정해야 한다 -- sub_hour 연산 있겠지.. 
+
+with
+t as (
+  select * except(interval_start_dt, interval_end_dt),
+         interval_start_dt as ts
+  from ${ref("credit_balances_history_interval")}
+  where interval_start_dt <= timestamp('${dataform.projectConfig.vars.ts}')
+    and timestamp('${dataform.projectConfig.vars.ts}') < interval_end_dt
+),
+i as (
+  select
+      * except(snap_dt, snap_hour, modified_at),
+      modified_at as ts
+  from ${ref("dpsnap_credit_balances")}
+  where snap_dt = extract(date from timestamp('${dataform.projectConfig.vars.ts}') at time zone 'Asia/Seoul')
+    and snap_hour = extract(hour from timestamp('${dataform.projectConfig.vars.ts}') at time zone 'Asia/Seoul')
+    and user_uid is not null
+),
+u as (
+  (
+    -- 현재 최신값
+    select *
+    from t
+  )
+  union all
+  (
+    select * except(last_ts)
+    from (
+      select
+          i.*,
+          t.ts as last_ts
+      from i
+      left join t
+      on i.user_uid = t.user_uid
+    )
+    where ts > last_ts -- 기존 변동 내역
+  )
+),
+s as (
+-- 당연히 같고, 당연히 다른 부분들은 except -> 비교할 부분만 남기기
+  select *, (select as struct u.* except(ts, id, account_id, user_uid)) as after
+  from u
+),
+t1 as (
+  select * except (after),
+    to_json_string(after) as after
+  from s
+),
+t2 as (
+  select *,
+    lag(after) over(same_user_window) as before
+  from t1
+  window same_user_window as (partition by user_uid order by ts)
+),
+t3 as (
+  select * except(before, after, ts),
+    ts,
+    lead(ts) over(same_user_window) as after_ts
+  from t2
+  where before != after
+    or before is null
+  window same_user_window as (partition by user_uid order by ts)
+),
+t4 as (
+  select * except(ts, after_ts),
+    ts as interval_start_dt,
+    coalesce(after_ts, timestamp(parse_date('%Y%m%d', '99991231'), 'Asia/Seoul')) as interval_end_dt
+  from t3
+),
+t5 as (
+  select *
+  from t4
+  where interval_start_dt < interval_end_dt
+)
+select *
+from t5
+
+post_operations {
+  delete from ${ref("credit_balances_history_interval")}
+  where user_uid in (select distinct user_uid from ${self()})
+    and interval_start_dt <= timestamp('${dataform.projectConfig.vars.ts}')
+    and timestamp('${dataform.projectConfig.vars.ts}') < interval_end_dt
+  ---
+  insert ${ref("credit_balances_history_interval")}
+  select *
+  from ${self()}
+}

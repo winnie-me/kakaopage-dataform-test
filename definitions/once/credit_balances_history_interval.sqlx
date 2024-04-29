@@ -1,0 +1,23 @@
+config {
+    type: "table",
+    tags: ["once"],
+    bigquery:
+    {
+        clusterBy: ["user_uid", "interval_start_dt", "interval_end_dt"]
+    }
+}
+
+with
+s as (
+    select
+        * except (modified_at, snap_dt, snap_hour),
+        modified_at as interval_start_dt,
+        -- TIMESTAMP(DATETIME_ADD(CAST(snap_dt AS DATETIME), INTERVAL snap_hour HOUR)) as interval_end_dt
+        timestamp(parse_date('%Y%m%d', '99991231'), 'Asia/Seoul') as interval_end_dt
+    from ${ref("dpsnap_credit_balances")}
+    where snap_dt = '2023-01-01' and snap_hour = 1
+        and user_uid is not null
+)
+select *
+from s
+where interval_start_dt < interval_end_dt
