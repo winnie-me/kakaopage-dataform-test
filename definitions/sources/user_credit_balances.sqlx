@@ -1,0 +1,6 @@
+config {
+    type: "declaration",
+    database: "prod-ai-project",
+    schema: "dp_base",
+    name: "dpsnap_credit_balances"
+}
